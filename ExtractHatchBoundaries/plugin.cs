@@ -55,6 +55,8 @@ namespace ExtractHatchBoundaries
                             bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
                         LayerTable lt = (LayerTable)tr.GetObject(sourceDb.LayerTableId, OpenMode.ForRead);
 
+                        ExplodeNestedBlocks(tr, ms, lt, ed);
+
                         // Snapshot ids first since we're about to add new entities to this same space
                         List<ObjectId> existingIds = new List<ObjectId>();
                         foreach (ObjectId id in ms) existingIds.Add(id);
@@ -64,12 +66,29 @@ namespace ExtractHatchBoundaries
                             if (id.ObjectClass.Name != "AcDbHatch") continue;
 
                             Hatch hatch = (Hatch)tr.GetObject(id, OpenMode.ForRead);
-                            string boundaryLayer = dwgName + hatch.Layer;
+                            if (!hatch.IsSolidFill) continue;
+
+                            char? suffix = GetBoundarySuffix(hatch.Layer);
+                            if (suffix == null)
+                            {
+                                ed.WriteMessage(
+                                    $"\nSkipping hatch on layer '{hatch.Layer}': no PM/P1/P2/P3 token found.");
+                                continue;
+                            }
+
+                            string boundaryLayer = dwgName + suffix;
 
                             if (!lt.Has(boundaryLayer))
                             {
+                                LayerTableRecord sourceLayer =
+                                    (LayerTableRecord)tr.GetObject(hatch.LayerId, OpenMode.ForRead);
+
                                 lt.UpgradeOpen();
-                                LayerTableRecord ltr = new LayerTableRecord { Name = boundaryLayer };
+                                LayerTableRecord ltr = new LayerTableRecord
+                                {
+                                    Name = boundaryLayer,
+                                    Color = sourceLayer.Color
+                                };
                                 lt.Add(ltr);
                                 tr.AddNewlyCreatedDBObject(ltr, true);
                                 lt.DowngradeOpen();
@@ -108,6 +127,63 @@ namespace ExtractHatchBoundaries
             }
 
             ed.WriteMessage($"\nExtracted {totalExtracted} boundary polylines from {files.Length} files.");
+        }
+
+        // Explodes every non-frozen block reference in the given space, including
+        // blocks nested inside other blocks, so hatches buried inside block
+        // definitions become top-level entities the hatch scan below can see.
+        // References on a frozen layer are left untouched, matching AutoCAD's own
+        // behavior of not regenerating/displaying frozen content. A single bad
+        // block (e.g. a proxy entity from a missing object enabler) is reported
+        // and skipped rather than aborting the whole source file.
+        private static void ExplodeNestedBlocks(Transaction tr, BlockTableRecord space, LayerTable lt, Editor ed)
+        {
+            bool explodedAny;
+            do
+            {
+                explodedAny = false;
+
+                List<ObjectId> ids = new List<ObjectId>();
+                foreach (ObjectId id in space) ids.Add(id);
+
+                foreach (ObjectId id in ids)
+                {
+                    Entity ent = (Entity)tr.GetObject(id, OpenMode.ForRead);
+                    if (!(ent is BlockReference blockRef)) continue;
+                    if (IsLayerFrozen(tr, lt, blockRef.Layer)) continue;
+
+                    try
+                    {
+                        blockRef.UpgradeOpen();
+                        blockRef.ExplodeToOwnerSpace();
+                        blockRef.Erase();
+                        explodedAny = true;
+                    }
+                    catch (Autodesk.AutoCAD.Runtime.Exception ex)
+                    {
+                        ed.WriteMessage($"\nCould not explode block '{blockRef.Name}': {ex.Message}");
+                    }
+                }
+            } while (explodedAny);
+        }
+
+        private static bool IsLayerFrozen(Transaction tr, LayerTable lt, string layerName)
+        {
+            if (!lt.Has(layerName)) return false;
+            LayerTableRecord layer = (LayerTableRecord)tr.GetObject(lt[layerName], OpenMode.ForRead);
+            return layer.IsFrozen;
+        }
+
+        // Maps a source layer name like "S-PV-02-HATCH_P1_COLOR 1" to the single
+        // boundary-layer suffix character for whichever of PM/P1/P2/P3 it contains.
+        // Returns null if the layer name contains none of them.
+        private static char? GetBoundarySuffix(string layerName)
+        {
+            if (layerName.IndexOf("PM", StringComparison.OrdinalIgnoreCase) >= 0) return 'M';
+            if (layerName.IndexOf("P1", StringComparison.OrdinalIgnoreCase) >= 0) return '1';
+            if (layerName.IndexOf("P2", StringComparison.OrdinalIgnoreCase) >= 0) return '2';
+            if (layerName.IndexOf("P3", StringComparison.OrdinalIgnoreCase) >= 0) return '3';
+            return null;
         }
 
         // Converts a HatchLoop into a Polyline. Handles the common "polyline loop"
