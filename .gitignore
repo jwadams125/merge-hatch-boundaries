@@ -1,0 +1,40 @@
+## .NET / Visual Studio build output
+[Bb]in/
+[Oo]bj/
+*.pdb
+
+## Visual Studio user-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+
+## ReSharper / Rider
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+## JetBrains Rider / IntelliJ
+.idea/
+
+## NuGet
+*.nupkg
+**/packages/*
+!**/packages/build/
+packages.config.bak
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ll]og/
+[Ll]ogs/
+
+## OS files
+.DS_Store
+Thumbs.db
+
+## Crash dumps
+*.dmp
