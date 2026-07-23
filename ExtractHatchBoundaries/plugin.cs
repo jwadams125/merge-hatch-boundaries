@@ -11,25 +11,30 @@ namespace ExtractHatchBoundaries
 {
     public class HatchBoundaryMerger
     {
-        // Layers to pull hatches FROM in the source files
-        private static readonly HashSet<string> LayerFilter =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "HATCH-A", "HATCH-B" };
-
         [CommandMethod("ExtractHatchBoundaries")]
         public void MergeHatchBoundaries()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
 
-            // Folder containing the 21 source DWGs
-            string sourceFolder = @"C:\Path\To\SourceDWGs";
+            PromptStringOptions folderOpts =
+                new PromptStringOptions("\nEnter source folder path: ") { AllowSpaces = true };
+            PromptResult folderResult = ed.GetString(folderOpts);
+            if (folderResult.Status != PromptStatus.OK) return;
+
+            string sourceFolder = folderResult.StringResult.Trim().Trim('"');
+            if (!Directory.Exists(sourceFolder))
+            {
+                ed.WriteMessage($"\nFolder not found: {sourceFolder}");
+                return;
+            }
+
             string[] files = Directory.GetFiles(sourceFolder, "*.dwg");
 
             // Destination = the currently open drawing. Could instead be a brand-new
             // Database you create and save out at the end if you don't want to
             // merge into an already-open file.
             Database destDb = doc.Database;
-            EnsureLayers(destDb, LayerFilter);
 
             int totalExtracted = 0;
 
@@ -41,12 +46,14 @@ namespace ExtractHatchBoundaries
                     sourceDb.ReadDwgFile(dwgPath, FileOpenMode.OpenForReadAndAllShare, true, null);
 
                     ObjectIdCollection idsToClone = new ObjectIdCollection();
+                    string dwgName = Path.GetFileNameWithoutExtension(dwgPath);
 
                     using (Transaction tr = sourceDb.TransactionManager.StartTransaction())
                     {
                         BlockTable bt = (BlockTable)tr.GetObject(sourceDb.BlockTableId, OpenMode.ForRead);
                         BlockTableRecord ms = (BlockTableRecord)tr.GetObject(
                             bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+                        LayerTable lt = (LayerTable)tr.GetObject(sourceDb.LayerTableId, OpenMode.ForRead);
 
                         // Snapshot ids first since we're about to add new entities to this same space
                         List<ObjectId> existingIds = new List<ObjectId>();
@@ -57,16 +64,30 @@ namespace ExtractHatchBoundaries
                             if (id.ObjectClass.Name != "AcDbHatch") continue;
 
                             Hatch hatch = (Hatch)tr.GetObject(id, OpenMode.ForRead);
-                            if (!LayerFilter.Contains(hatch.Layer)) continue;
+                            string boundaryLayer = dwgName + hatch.Layer;
+
+                            if (!lt.Has(boundaryLayer))
+                            {
+                                lt.UpgradeOpen();
+                                LayerTableRecord ltr = new LayerTableRecord { Name = boundaryLayer };
+                                lt.Add(ltr);
+                                tr.AddNewlyCreatedDBObject(ltr, true);
+                                lt.DowngradeOpen();
+                            }
 
                             for (int i = 0; i < hatch.NumberOfLoops; i++)
                             {
                                 Polyline pline = LoopToPolyline(hatch.GetLoopAt(i));
                                 if (pline == null) continue;
 
-                                pline.Layer = hatch.Layer;
+                                // Append before setting Layer: an entity that isn't yet
+                                // database-resident resolves symbol names (Layer, etc.)
+                                // against HostApplicationServices.WorkingDatabase (the active
+                                // document), not its eventual owner. Since boundaryLayer only
+                                // exists in sourceDb, we must make pline resident there first.
                                 ObjectId plineId = ms.AppendEntity(pline);
                                 tr.AddNewlyCreatedDBObject(pline, true);
+                                pline.Layer = boundaryLayer;
                                 idsToClone.Add(plineId);
                             }
                         }
@@ -87,22 +108,6 @@ namespace ExtractHatchBoundaries
             }
 
             ed.WriteMessage($"\nExtracted {totalExtracted} boundary polylines from {files.Length} files.");
-        }
-
-        private static void EnsureLayers(Database db, IEnumerable<string> layers)
-        {
-            using (Transaction tr = db.TransactionManager.StartTransaction())
-            {
-                LayerTable lt = (LayerTable)tr.GetObject(db.LayerTableId, OpenMode.ForWrite);
-                foreach (string lyr in layers)
-                {
-                    if (lt.Has(lyr)) continue;
-                    LayerTableRecord ltr = new LayerTableRecord { Name = lyr };
-                    lt.Add(ltr);
-                    tr.AddNewlyCreatedDBObject(ltr, true);
-                }
-                tr.Commit();
-            }
         }
 
         // Converts a HatchLoop into a Polyline. Handles the common "polyline loop"
